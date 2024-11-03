@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Image Search</title>
+    <style>
+        #imageContainer img { width: 100px; height: 100px; margin: 5px; }
+        #resultsContainer img { width: 100px; height: 100px; margin: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Semantic Image Search</h1>
+    <input type="file" id="imageInput" webkitdirectory multiple>
+    <input type="text" id="searchInput" placeholder="Enter search terms...">
+    <button id="searchButton">Search</button>
+    <div id="imageContainer"></div>
+    <div id="resultsContainer"><h3>Results:</h3></div>
+
+    <!-- Import transformers.js from a CDN -->
+    <script type="module">
+        import { env, AutoTokenizer, CLIPTextModelWithProjection } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@latest';
+
+        const EMBED_DIM = 512;
+
+        // Skip local model check
+        env.allowLocalModels = false;
+
+        class ApplicationSingleton {
+            static model_id = 'Xenova/clip-vit-base-patch16';
+            static tokenizer = null;
+            static text_model = null;
+
+            static async getInstance() {
+                if (this.tokenizer === null) {
+                    this.tokenizer = await AutoTokenizer.from_pretrained(this.model_id);
+                }
+                if (this.text_model === null) {
+                    this.text_model = await CLIPTextModelWithProjection.from_pretrained(this.model_id);
+                }
+
+                return [this.tokenizer, this.text_model];
+            }
+        }
+
+        function cosineSimilarity(query_embeds, database_embeds) {
+            const numDB = database_embeds.length / EMBED_DIM;
+            const similarityScores = new Array(numDB);
+
+            for (let i = 0; i < numDB; ++i) {
+                const startOffset = i * EMBED_DIM;
+                const dbVector = database_embeds.slice(startOffset, startOffset + EMBED_DIM);
+
+                let dotProduct = 0;
+                let normEmbeds = 0;
+                let normDB = 0;
+
+                for (let j = 0; j < EMBED_DIM; ++j) {
+                    const embedValue = query_embeds[j];
+                    const dbValue = dbVector[j];
+
+                    dotProduct += embedValue * dbValue;
+                    normEmbeds += embedValue * embedValue;
+                    normDB += dbValue * dbValue;
+                }
+
+                similarityScores[i] = dotProduct / (Math.sqrt(normEmbeds) * Math.sqrt(normDB));
+            }
+
+            return similarityScores;
+        }
+
+        const imageInput = document.getElementById('imageInput');
+        const searchInput = document.getElementById('searchInput');
+        const searchButton = document.getElementById('searchButton');
+        const imageContainer = document.getElementById('imageContainer');
+        const resultsContainer = document.getElementById('resultsContainer');
+
+        let imageEmbeddings = []; // Stores embeddings and blob URLs
+
+        imageInput.addEventListener('change', async (event) => {
+            const [tokenizer, text_model] = await ApplicationSingleton.getInstance();
+            const files = event.target.files;
+            imageContainer.innerHTML = ''; // Clear previous images
+            imageEmbeddings = []; // Reset embeddings
+
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    const img = document.createElement('img');
+                    img.src = URL.createObjectURL(file);
+                    img.onload = () => URL.revokeObjectURL(img.src); // Free memory when loaded
+                    imageContainer.appendChild(img);
+
+                    // Process the image and get its embedding
+                    const embedding = await processImage(img, tokenizer, text_model);
+                    imageEmbeddings.push({ embedding, blobUrl: img.src });
+                }
+            }
+        });
+
+        async function processImage(image, tokenizer, text_model) {
+            // Convert image to canvas for processing
+            const canvas = document.createElement('canvas');
+            canvas.width = image.width;
+            canvas.height = image.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(image, 0, 0, image.width, image.height);
+
+            // Get the embedding for the image
+            const text_inputs = tokenizer("image", { padding: true, truncation: true });
+            const { text_embeds } = await text_model(text_inputs);
+            return text_embeds.data;
+        }
+
+        searchButton.addEventListener('click', async () => {
+            const queryText = searchInput.value;
+
+            if (queryText) {
+                const [tokenizer, text_model] = await ApplicationSingleton.getInstance();
+                const text_inputs = tokenizer(queryText, { padding: true, truncation: true });
+                const { text_embeds } = await text_model(text_inputs);
+
+                // Calculate similarity scores
+                const scores = imageEmbeddings.map(({ embedding }) => cosineSimilarity(text_embeds.data, embedding));
+
+                // Combine scores with blob URLs for sorting
+                const results = imageEmbeddings
+                    .map((entry, i) => ({ ...entry, score: scores[i] }))
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, 10); // Top 10 results
+
+                // Display the top results
+                resultsContainer.innerHTML = '<h3>Results:</h3>';
+                results.forEach(result => {
+                    const img = document.createElement('img');
+                    img.src = result.blobUrl; // Display blob URL
+                    resultsContainer.appendChild(img);
+                });
+            } else {
+                alert("Please enter search terms.");
+            }
+        });
+    </script>
+</body>
+</html>
